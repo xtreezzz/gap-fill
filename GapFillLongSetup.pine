@@ -1,0 +1,85 @@
+// © jules
+//@version=5
+// -----------------------------------------------------------------------------
+// Screener: Отскок от Закрытия Гэпа (Gap Fill Long Setup)
+// -----------------------------------------------------------------------------
+// Цель: Автоматизировать поиск сетапов, где акция открывается с гэпом вверх,
+// распродается в течение дня и подходит к уровню закрытия предыдущего дня
+// (уровень поддержки), входя в "зону покупки".
+// -----------------------------------------------------------------------------
+indicator("Screener: Отскок от Закрытия Гэпа", "Gap Fill Long", overlay=true)
+
+// —————— 1. Входные Параметры (Настройки пользователя) ——————
+// Группа для настроек сетапа
+group_setup = "Настройки Сетапа"
+min_gap_percent = input.float(3.0, "Минимальный размер гэпа вверх (%)", minval=0.0, step=0.1, group=group_setup)
+min_drop_from_open = input.float(-2.0, "Минимальное падение от открытия (%)", maxval=0.0, step=0.1, group=group_setup)
+fill_zone_percent = input.float(1.0, "Зона 'подлета' к уровню гэпа (%)", minval=0.0, step=0.1, group=group_setup)
+
+// Группа для фильтров
+group_filters = "Фильтры"
+min_volume = input.int(1000000, "Минимальный дневной объем", minval=0, group=group_filters)
+min_price = input.float(10.0, "Минимальная цена акции", minval=0.0, group=group_filters)
+use_rsi_filter = input.bool(true, "Включить фильтр RSI", group=group_filters)
+rsi_level = input.float(40, "Уровень RSI для 'перепроданности'", minval=0, maxval=100, group=group_filters)
+rsi_length = input.int(14, "Длина RSI", minval=1, group=group_filters)
+
+
+// —————— 2. Получение данных с Дневного Таймфрейма ——————
+// Запрашиваем данные с D таймфрейма, используя `request.security`.
+// `close[1]` на дневном ТФ дает нам цену закрытия предыдущего дня.
+// `lookahead=barmerge.lookahead_on` гарантирует, что мы смотрим на завершенные дневные данные, избегая перерисовки.
+var support_level = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+var daily_volume = request.security(syminfo.tickerid, "D", volume[1], lookahead=barmerge.lookahead_on)
+daily_rsi = request.security(syminfo.tickerid, "D", ta.rsi(close, rsi_length), lookahead=barmerge.lookahead_on)
+
+
+// —————— 3. Алгоритм Логики (Условия для Сигнала) ——————
+// Условие 0: Фильтры ликвидности и цены
+liquidity_filter_passed = daily_volume > min_volume and close > min_price
+
+// Условие 1: Сильный Гэп Вверх
+// `open` - цена открытия текущего интрадей бара (и дня).
+gap_up_condition = open > (support_level * (1 + min_gap_percent / 100))
+
+// Условие 2: Акция Шортится (падение от открытия)
+// `close` - текущая цена.
+drop_from_open_condition = close < (open * (1 + min_drop_from_open / 100))
+
+// Условие 3: Цена в "Зоне Покупки"
+// Цена находится выше уровня поддержки, но в пределах указанной зоны.
+in_buy_zone_condition = close > support_level and close < (support_level * (1 + fill_zone_percent / 100))
+
+// Условие 4: Фильтр RSI (если включен)
+rsi_filter_passed = not use_rsi_filter or daily_rsi < rsi_level
+
+// Конечное условие: все условия должны быть истинны
+// `barstate.isrealtime` гарантирует, что сигнал появляется только на реал-тайм данных.
+signal_condition = barstate.isrealtime and liquidity_filter_passed and gap_up_condition and drop_from_open_condition and in_buy_zone_condition and rsi_filter_passed
+
+
+// —————— 4. Визуализация на Графике ——————
+// Определяем верхнюю границу зоны покупки
+var zone_top_level = support_level * (1 + fill_zone_percent / 100)
+
+// Рисуем уровень поддержки (только если был гэп)
+// Уровень будет виден только в те дни, когда условие гэпа выполняется
+plot(gap_up_condition ? support_level : na, "Уровень поддержки", color=color.new(color.green, 0), style=plot.style_linebr)
+
+// Заливаем "Зону покупки"
+// `fill` требует два plot'а. Создаем их и заливаем пространство между ними.
+// Отображаем зону только в дни, когда есть гэп.
+support_line = plot(gap_up_condition ? support_level : na, color=na)
+zone_top_line = plot(gap_up_condition ? zone_top_level : na, color=na)
+fill(support_line, zone_top_line, color=color.new(color.green, 90), title="Зона покупки")
+
+// Сигнальная Метка (появляется под свечой при выполнении всех условий)
+plotshape(signal_condition, "Сигнал 'Наблюдение'", style=shape.triangleup, location=location.belowbar, color=color.aqua, size=size.small)
+
+
+// —————— 5. Функционал Оповещений (Alerts) ——————
+// Формируем динамическое сообщение для алерта
+alert_message = str.format("{0} в зоне закрытия гэпа. Уровень: {1, number}. Наблюдать за отскоком.", syminfo.ticker, support_level)
+
+// Создаем условие для алерта
+alertcondition(signal_condition, title="Gap Fill Long Setup", message=alert_message)
